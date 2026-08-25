@@ -2,6 +2,8 @@
 
 Git for humans, safely. A from-scratch Go rewrite of [legit](https://github.com/frostming/legit): the same everyday workflows (switch, sync, publish, unpublish, undo, branches) with faster startup and stricter safety rules. elgit shells out to your own git binary, so your config, credentials, and hooks always apply.
 
+<div align="center"><img width="639" height="614" alt="image" src="https://github.com/user-attachments/assets/c7032910-d4da-4588-bc5d-d231ee6b68d1" /></div>
+
 ## Why
 
 legit (the Python tool) died of its dependencies: two abandoned libraries, string-parsed stash matching, shell-string alias installs. elgit keeps the workflows and replaces the plumbing:
