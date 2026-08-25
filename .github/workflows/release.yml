@@ -1,0 +1,268 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve_version.outputs.version }}
+      is_prerelease: ${{ steps.resolve_version.outputs.is_prerelease }}
+    steps:
+      - name: Resolve release version
+        id: resolve_version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+
+          if [ -z "${VERSION}" ]; then
+            echo "Error: VERSION is empty"
+            exit 1
+          fi
+
+          if [[ "${VERSION}" == v* ]]; then
+            echo "Error: tags must not use 'v' prefix (got: ${VERSION})"
+            exit 1
+          fi
+
+          if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Error: VERSION must be SemVer-like (got: ${VERSION})"
+            exit 1
+          fi
+
+          if [[ "${VERSION%%+*}" == *-* ]]; then
+            IS_PRERELEASE=true
+          else
+            IS_PRERELEASE=false
+          fi
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "${GITHUB_OUTPUT}"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+  test-linux-amd64:
+    runs-on: ubuntu-latest
+    needs: resolve
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Run tests
+        run: make test-ci
+      - name: Build linux (amd64 + arm64, pure Go)
+        run: make cross-compile
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: linux
+          path: |
+            dist/elgit-linux-amd64
+            dist/elgit-linux-arm64
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-latest
+    needs: resolve
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Build darwin (arm64 + amd64, pure Go)
+        run: |
+          mkdir -p dist
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-s -w" -trimpath -o dist/elgit-darwin-arm64 ./cmd/elgit
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -trimpath -o dist/elgit-darwin-amd64 ./cmd/elgit
+      - name: Create macOS universal binary
+        run: |
+          lipo -create -output dist/elgit dist/elgit-darwin-arm64 dist/elgit-darwin-amd64
+          lipo -info dist/elgit
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: darwin
+          path: |
+            dist/elgit-darwin-arm64
+            dist/elgit-darwin-amd64
+            dist/elgit
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [resolve, lint, test-linux-amd64, build-macos]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Package release archives
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          cd dist
+          chmod +x elgit-darwin-arm64 elgit-darwin-amd64 elgit-linux-amd64 elgit-linux-arm64 elgit
+
+          # Versioned per-platform tarballs (used by scripts/install.sh).
+          tar -czf "elgit-darwin-arm64-${VERSION}.tar.gz" elgit-darwin-arm64
+          tar -czf "elgit-darwin-amd64-${VERSION}.tar.gz" elgit-darwin-amd64
+          tar -czf "elgit-linux-amd64-${VERSION}.tar.gz" elgit-linux-amd64
+          tar -czf "elgit-linux-arm64-${VERSION}.tar.gz" elgit-linux-arm64
+
+          # Unversioned Homebrew-facing archives with the plain binary name.
+          mkdir -p macos linux-amd64 linux-arm64
+          cp elgit macos/elgit
+          cp elgit-linux-amd64 linux-amd64/elgit
+          cp elgit-linux-arm64 linux-arm64/elgit
+          tar -czf elgit-macos-universal.tar.gz -C macos elgit
+          tar -czf elgit-linux-amd64.tar.gz -C linux-amd64 elgit
+          tar -czf elgit-linux-arm64.tar.gz -C linux-arm64 elgit
+          rm -rf macos linux-amd64 linux-arm64
+      - name: Generate checksums
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          cd dist
+          sha256sum \
+            "elgit-darwin-arm64-${VERSION}.tar.gz" \
+            "elgit-darwin-amd64-${VERSION}.tar.gz" \
+            "elgit-linux-amd64-${VERSION}.tar.gz" \
+            "elgit-linux-arm64-${VERSION}.tar.gz" \
+            "elgit-macos-universal.tar.gz" \
+            "elgit-linux-amd64.tar.gz" \
+            "elgit-linux-arm64.tar.gz" \
+            > checksums.txt
+      - name: Verify release outputs
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -e
+          expected_files=(
+            "dist/elgit-darwin-arm64-${VERSION}.tar.gz"
+            "dist/elgit-darwin-amd64-${VERSION}.tar.gz"
+            "dist/elgit-linux-amd64-${VERSION}.tar.gz"
+            "dist/elgit-linux-arm64-${VERSION}.tar.gz"
+            "dist/elgit-macos-universal.tar.gz"
+            "dist/elgit-linux-amd64.tar.gz"
+            "dist/elgit-linux-arm64.tar.gz"
+            "dist/checksums.txt"
+          )
+          for file in "${expected_files[@]}"; do
+            if [ -f "${file}" ]; then
+              echo "OK ${file} ($(stat -c%s "${file}") bytes)"
+            else
+              echo "Missing expected artifact: ${file}"
+              exit 1
+            fi
+          done
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION_SEMVER: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          changelog_file="CHANGELOG.md"
+          notes_file="release_notes.md"
+          start_marker="<!-- RELEASE:START ${VERSION_SEMVER} -->"
+          end_marker="<!-- RELEASE:END ${VERSION_SEMVER} -->"
+
+          if [ -f "${changelog_file}" ]; then
+            awk -v start="${start_marker}" -v end="${end_marker}" '
+              $0 == start { in_section = 1; next }
+              $0 == end { in_section = 0; exit }
+              in_section { print }
+            ' "${changelog_file}" > "${notes_file}"
+          else
+            : > "${notes_file}"
+          fi
+
+          if ! grep -q '[^[:space:]]' "${notes_file}"; then
+            echo "CHANGELOG.md has no RELEASE markers for ${VERSION_SEMVER}; refusing empty release notes" >&2
+            exit 1
+          fi
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.resolve.outputs.version }}
+          name: elgit ${{ needs.resolve.outputs.version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ needs.resolve.outputs.is_prerelease == 'true' }}
+          files: |
+            dist/elgit-darwin-arm64-${{ needs.resolve.outputs.version }}.tar.gz
+            dist/elgit-darwin-amd64-${{ needs.resolve.outputs.version }}.tar.gz
+            dist/elgit-linux-amd64-${{ needs.resolve.outputs.version }}.tar.gz
+            dist/elgit-linux-arm64-${{ needs.resolve.outputs.version }}.tar.gz
+            dist/elgit-macos-universal.tar.gz
+            dist/elgit-linux-amd64.tar.gz
+            dist/elgit-linux-arm64.tar.gz
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update release marker file
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "$VERSION" > VERSION
+          git add VERSION
+          git commit -m "chore: update VERSION to $VERSION" || echo "No changes to commit"
+          git push origin HEAD:main || echo "Failed to push release marker update"
+
+  update-tap:
+    needs: [release, resolve]
+    if: ${{ needs.resolve.outputs.is_prerelease != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Homebrew Tap Update
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'EstebanForge',
+              repo: 'homebrew-tap',
+              workflow_id: 'update-formula.yml',
+              ref: 'main',
+              inputs: {
+                formula: 'elgit',
+                tag: '${{ needs.resolve.outputs.version }}',
+                repository: '${{ github.repository }}'
+              }
+            })
