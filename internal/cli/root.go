@@ -25,8 +25,9 @@ func NewRootCmd() *cobra.Command {
 		Use:   "elgit",
 		Short: "Git for humans, safely.",
 		Long: "elgit wraps everyday git workflows: switch branches without losing\n" +
-			"uncommitted work, sync with the remote, publish and unpublish branches,\n" +
-			"undo the last commit, list branches.",
+			"uncommitted work, create commits, merge other branches, sync with\n" +
+			"the remote, publish and unpublish branches, undo the last commit,\n" +
+			"list branches, glance at the repository state.",
 		Version:      Version,
 		SilenceUsage: true,
 	}
@@ -63,10 +64,13 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(
 		newSwitchCmd(runner),
 		newSyncCmd(runner),
+		newCommitCmd(runner),
+		newMergeCmd(runner),
 		newPublishCmd(runner),
 		newUnpublishCmd(runner),
 		newUndoCmd(runner),
 		newBranchesCmd(runner),
+		newStatusCmd(runner),
 		newConfigCmd(runner),
 	)
 	return root

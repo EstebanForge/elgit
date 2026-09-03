@@ -6,7 +6,7 @@ Git for humans, safely. A from-scratch Go rewrite of [legit](https://github.com/
 
 ## Why
 
-legit (the Python tool) died of its dependencies: two abandoned libraries, string-parsed stash matching, shell-string alias installs. elgit keeps the workflows and replaces the plumbing:
+legit (the Python tool) died of its dependencies: two abandoned libraries, string-parsed stash matching, shell-string alias installs. elgit keeps the workflows and adds the commit-merge half GitHub Desktop owns, then replaces the plumbing:
 
 - Static binary, ~2ms startup instead of a ~300ms interpreter plus GitPython import.
 - Stashes are tracked by commit OID in a ledger under the common git dir (`.git/elgit/ledger.json`), never by grepping stash messages or slicing list lines. A restore applies the stash by OID and drops it only after re-verifying the OID, so concurrent changes to the stash stack cannot redirect it onto the wrong entry.
@@ -42,6 +42,9 @@ elgit sw                  # pick a branch interactively (filter + arrows); remot
 elgit sw <branch>         # switch directly, stashing and restoring local changes
 elgit sync                 # stash, fetch, merge-or-rebase, push, restore
 elgit sync <branch>        # sync another branch, then return to the current one
+elgit commit               # stage modified tracked files, one commit (-m for scripts, --all adds untracked)
+elgit merge <branch>       # compare with a branch, then merge it into the current one
+elgit status               # branch, upstream distance, working tree summary
 elgit pub                  # publish the current branch to the remote (push -u)
 elgit unpub <branch>       # delete the branch on the remote
 elgit undo                 # undo the last commit (--hard also discards its changes)
@@ -54,6 +57,12 @@ elgit --uninstall          # remove elgit and legacy legit aliases
 With aliases installed, `git sync`, `git sw feature`, and bare `git sw` (the interactive picker) work directly. elgit never installs a `switch` alias, so the native `git switch` command is never shadowed. The alias value quotes the elgit path, so installs from paths containing spaces work; git itself executes `!` aliases through a shell, which is why the quoting is there.
 
 `elgit sw` without an argument opens a filterable branch list (charmbracelet/huh, the same select stack as wicket-cli-tools): arrows to move, type to filter, enter to select, ESC or Ctrl-C to cancel. Remote-only branches are listed with a `(remote only)` marker and a fresh `fetch --prune`; picking one creates the local branch with tracking. Without a terminal the same prompt degrades to a numbered list, so scripts keep working.
+
+`elgit commit` is the Desktop commit button: it stages every modified tracked file and creates exactly one commit. Untracked files join only with `--all`, so a stray scratch file never rides into history. `-m` takes the summary, `-d` the optional longer description; with neither, a terminal gets a two-field prompt (summary required, description optional) and a non-terminal gets an error, so scripts never stall. `--amend` rewords or folds staged work into the last commit. Commit never pushes.
+
+`elgit merge` is the Desktop compare tab: it names the incoming commits ("Merging 7 commits from stage into main"), then merges with a plain `git merge`, so your `merge.ff` config decides fast-forward versus merge commit. Without an argument a picker lists branches with ahead/behind counts (one `for-each-ref` call, git 2.29+; older git lists without counts). Remote-only branches merge straight from their remote-tracking ref, fetched first so the counts are current. An already-merged candidate short-circuits with "Already up to date." Merge never pushes: run `elgit sync` after.
+
+`elgit status` (alias `st`) is the opening glance: current branch, upstream distance in ahead/behind, and a staged/modified/untracked summary. Read-only; no network.
 
 ## Settings
 
@@ -74,6 +83,9 @@ elgit reads the standard git config hierarchy (repo, global, includes), `[legit]
 5. The stash ledger survives crashes. The next mutating run warns about unrestored entries with their OIDs.
 6. Undo warns when HEAD is a merge commit before removing it.
 7. A failed fetch or push restores the stashed work automatically: clean tree, original error, no lost context.
+8. `elgit commit` never pushes and stages tracked modifications only; untracked files join with `--all`, never by accident.
+9. `elgit merge` refuses a dirty working tree. There is no stash flow around a merge on purpose: a conflicted stash restore can never land on top of a committed merge, the one state `git merge --abort` cannot unwind.
+10. `commit` and `merge` are never installed as git aliases: both would shadow native git commands. `git status` stays native too.
 
 ## Differences from legit
 

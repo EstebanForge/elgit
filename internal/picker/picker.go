@@ -66,7 +66,7 @@ func pickSelect(title string, items []Item) (string, error) {
 	).
 		WithTheme(huh.ThemeCharm()).
 		WithShowHelp(false).
-		WithKeyMap(cancelKeymap()).
+		WithKeyMap(CancelKeymap()).
 		Run()
 	if err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
@@ -77,10 +77,10 @@ func pickSelect(title string, items []Item) (string, error) {
 	return selected, nil
 }
 
-// cancelKeymap binds quit to both Ctrl-C and ESC, matching user
+// CancelKeymap binds quit to both Ctrl-C and ESC, matching user
 // expectations (and wicket-cli-tools): ESC aborts the prompt instead of
 // only clearing the filter. Backspace still clears the filter.
-func cancelKeymap() *huh.KeyMap {
+func CancelKeymap() *huh.KeyMap {
 	km := huh.NewDefaultKeyMap()
 	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"))
 	return km
