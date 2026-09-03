@@ -1,6 +1,6 @@
 # elgit, Git for Humans
 
-Git for humans, safely. A from-scratch Go rewrite of [legit](https://github.com/frostming/legit): the same everyday workflows (switch, sync, publish, unpublish, undo, branches) with faster startup and stricter safety rules. elgit shells out to your own git binary, so your config, credentials, and hooks always apply.
+Git for humans, safely. A from-scratch Go rewrite of [legit](https://github.com/frostming/legit): the same everyday workflows (switch, sync, publish, unpublish, undo, branches) plus the commit-merge-status loop GitHub Desktop owns, with faster startup and stricter safety rules. elgit shells out to your own git binary, so your config, credentials, and hooks always apply.
 
 <div align="center"><img width="639" height="614" alt="image" src="https://github.com/user-attachments/assets/c7032910-d4da-4588-bc5d-d231ee6b68d1" /></div>
 
@@ -43,7 +43,7 @@ elgit sw <branch>         # switch directly, stashing and restoring local change
 elgit sync                 # stash, fetch, merge-or-rebase, push, restore
 elgit sync <branch>        # sync another branch, then return to the current one
 elgit commit               # stage modified tracked files, one commit (-m for scripts, --all adds untracked)
-elgit merge <branch>       # compare with a branch, then merge it into the current one
+elgit merge [branch]       # compare with a branch, then merge it into the current one (bare: picker with ahead/behind)
 elgit status               # branch, upstream distance, working tree summary
 elgit pub                  # publish the current branch to the remote (push -u)
 elgit unpub [branch]       # delete the branch on the remote (picker of published branches on a terminal)
@@ -57,6 +57,8 @@ elgit --uninstall          # remove elgit and legacy legit aliases
 With aliases installed, `git sync`, `git sw feature`, and bare `git sw` (the interactive picker) work directly. elgit never installs a `switch` alias, so the native `git switch` command is never shadowed. The alias value quotes the elgit path, so installs from paths containing spaces work; git itself executes `!` aliases through a shell, which is why the quoting is there.
 
 `elgit sw` without an argument opens a filterable branch list (charmbracelet/huh, the same select stack as wicket-cli-tools): arrows to move, type to filter, enter to select, ESC or Ctrl-C to cancel. Remote-only branches are listed with a `(remote only)` marker and a fresh `fetch --prune`; picking one creates the local branch with tracking. Without a terminal the same prompt degrades to a numbered list, so scripts keep working.
+
+Every remote wait before a menu shows a spinner with a message (`Fetching branches`), so a slow fetch never looks like a hang; without a terminal it degrades to a single plain line.
 
 `elgit commit` is the Desktop commit button: it stages every modified tracked file and creates exactly one commit. Untracked files join only with `--all`, so a stray scratch file never rides into history. `-m` takes the summary, `-d` the optional longer description; with neither, a terminal gets a two-field prompt (summary required, description optional) and a non-terminal gets an error, so scripts never stall. `--amend` rewords or folds staged work into the last commit. Commit never pushes.
 
@@ -81,7 +83,7 @@ elgit reads the standard git config hierarchy (repo, global, includes), `[legit]
 1. Stashes are recorded by commit OID with branch and purpose. Restores apply by OID and drop only after a post-drop verification; a missing OID means the stash was already handled and the record is cleared.
 2. Merge and rebase conflicts stop the run. The conflicted state stays; the error prints the exact `git rebase --continue` / `--abort` commands and where the stash is. The stash is deliberately not restored onto a conflicted tree.
 3. elgit never force-pushes and never loops on a push race; it restores the stash (if any), reports, and exits.
-4. Mutating commands refuse to run while a merge, rebase, cherry-pick, revert, bisect, or am is in progress, and before the first commit exists.
+4. Mutating commands refuse to run while a merge, rebase, cherry-pick, revert, bisect, or am is in progress, and before the first commit exists. `elgit commit` is the deliberate exception to the no-first-commit rule: it is how the first commit happens.
 5. The stash ledger survives crashes. The next mutating run warns about unrestored entries with their OIDs.
 6. Undo warns when HEAD is a merge commit before removing it.
 7. A failed fetch or push restores the stashed work automatically: clean tree, original error, no lost context.
