@@ -12,6 +12,7 @@ import (
 	"github.com/EstebanForge/elgit/internal/gitx"
 	"github.com/EstebanForge/elgit/internal/picker"
 	"github.com/EstebanForge/elgit/internal/repo"
+	"github.com/EstebanForge/elgit/internal/spin"
 	"github.com/EstebanForge/elgit/internal/workflow"
 )
 
@@ -52,7 +53,11 @@ func switchInteractive(ctx context.Context, cmd *cobra.Command, w *workflow.Work
 	}
 
 	if remote != "" && !r.Git.Fake {
-		if _, ferr := r.Git.Mutate(ctx, "fetch", remote, "--prune"); ferr != nil {
+		ferr := spin.Run(cmd.OutOrStdout(), "Fetching branches", func() error {
+			_, err := r.Git.Mutate(ctx, "fetch", remote, "--prune")
+			return err
+		})
+		if ferr != nil {
 			sayln(cmd.ErrOrStderr(), "fetch failed; showing last-known remote branches")
 		}
 	}
@@ -131,16 +136,97 @@ func newPublishCmd(runner func() *gitx.Runner) *cobra.Command {
 
 func newUnpublishCmd(runner func() *gitx.Runner) *cobra.Command {
 	return &cobra.Command{
-		Use:     "unpublish <branch>",
+		Use:     "unpublish [branch]",
 		Aliases: []string{"unpub"},
 		Short:   "Delete a branch on the remote",
-		Args:    cobra.ExactArgs(1),
+		Long: "Deletes the remote copy of a branch; the local branch stays.\n" +
+			"Without an argument on a terminal, a picker lists the published\n" +
+			"branches. The interactive path needs a terminal on purpose: this\n" +
+			"command deletes a remote ref, so scripts must name the branch\n" +
+			"explicitly and nothing is ever deleted through a prompt.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			name := ""
+			if len(args) == 1 {
+				name = args[0]
+			}
 			return withLock(cmd, runner(), func(ctx context.Context, w *workflow.Workflow) error {
-				return w.Unpublish(ctx, args[0])
+				if name == "" {
+					picked, err := unpublishPick(ctx, cmd, w)
+					if err != nil {
+						return err
+					}
+					if picked == "" {
+						return nil // user aborted, or nothing is published
+					}
+					name = picked
+				}
+				return w.Unpublish(ctx, name)
 			})
 		},
 	}
+}
+
+// unpublishPick opens a picker of published branches and returns the
+// chosen name, "" when the user aborts or nothing is published.
+// Unpublish deletes a remote ref, so unlike the sw and merge pickers
+// there is no numbered-list fallback: without a terminal it errors and
+// scripts name the branch.
+func unpublishPick(ctx context.Context, cmd *cobra.Command, w *workflow.Workflow) (string, error) {
+	if !stdinIsTerminal(cmd) {
+		return "", errors.New("branch required: pass a branch or run elgit unpub from a terminal")
+	}
+	r := w.Repo
+	remote, err := r.Remote(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !r.Git.Fake {
+		// Publication state must be fresh before offering deletions.
+		err := spin.Run(cmd.OutOrStdout(), "Fetching published branches", func() error {
+			_, ferr := r.Git.Mutate(ctx, "fetch", remote, "--prune")
+			return ferr
+		})
+		if err != nil {
+			sayln(cmd.ErrOrStderr(), "fetch failed; showing last-known remote state")
+		}
+	}
+	branches, err := r.Branches(ctx, remote)
+	if err != nil {
+		return "", err
+	}
+	items := publishedBranchItems(branches)
+	if len(items) == 0 {
+		sayln(cmd.OutOrStdout(), "No published branches to unpublish.")
+		return "", nil
+	}
+	// Without a terminal the destructive picker never runs, so this
+	// error mapping is unreachable there; on a terminal, backing out is
+	// not an error. "" on abort is this function's documented contract.
+	picked, err := picker.Pick(cmd.OutOrStdout(), cmd.InOrStdin(),
+		"Unpublish on "+remote+" (type to filter or use arrows)", items)
+	if errors.Is(err, picker.ErrAborted) {
+		return "", nil
+	}
+	return picked, err
+}
+
+// publishedBranchItems keeps only branches with a remote counterpart,
+// naming the current branch so its remote-only deletion is visible
+// before the choice, not after.
+func publishedBranchItems(branches []repo.Branch) []picker.Item {
+	items := make([]picker.Item, 0, len(branches))
+	for _, b := range branches {
+		if !b.IsPublished {
+			continue
+		}
+		detail := b.Detail()
+		if b.IsCurrent {
+			detail = "(published, current branch: remote copy deleted)"
+		}
+		items = append(items, picker.Item{Name: b.Name, Detail: detail})
+	}
+	return items
 }
 
 func newUndoCmd(runner func() *gitx.Runner) *cobra.Command {
@@ -321,6 +407,9 @@ func newMergeCmd(runner func() *gitx.Runner) *cobra.Command {
 				if name == "" {
 					picked, perr := mergePick(ctx, cmd, w, remote)
 					if perr != nil {
+						if errors.Is(perr, picker.ErrAborted) {
+							return nil // user backed out of the picker
+						}
 						return perr
 					}
 					if picked == "" {
@@ -364,7 +453,11 @@ func newMergeCmd(runner func() *gitx.Runner) *cobra.Command {
 func mergePick(ctx context.Context, cmd *cobra.Command, w *workflow.Workflow, remote string) (string, error) {
 	r := w.Repo
 	if remote != "" && !r.Git.Fake {
-		if _, err := r.Git.Mutate(ctx, "fetch", remote, "--prune"); err != nil {
+		err := spin.Run(cmd.OutOrStdout(), "Fetching branches", func() error {
+			_, ferr := r.Git.Mutate(ctx, "fetch", remote, "--prune")
+			return ferr
+		})
+		if err != nil {
 			sayln(cmd.ErrOrStderr(), "fetch failed; showing last-known remote branches")
 		}
 	}

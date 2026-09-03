@@ -13,14 +13,20 @@ import (
 	"github.com/EstebanForge/elgit/internal/picker"
 )
 
+// stdinIsTerminal reports whether the command's stdin is an interactive
+// terminal. Destructive interactive flows refuse to run without one.
+func stdinIsTerminal(cmd *cobra.Command) bool {
+	f, ok := cmd.InOrStdin().(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
 // promptCommitMessage asks for the commit summary (required) and the
 // longer description (optional) on a terminal. Callers prefill
 // *subject and *description before the call (amend prefills the last
 // message). Without a terminal it returns an error pointing at -m, so
 // scripts never stall: scripted calls pass -m.
 func promptCommitMessage(cmd *cobra.Command, subject, description *string) error {
-	f, ok := cmd.InOrStdin().(*os.File)
-	if !ok || !term.IsTerminal(int(f.Fd())) {
+	if !stdinIsTerminal(cmd) {
 		return errors.New("no message given: pass -m or run elgit commit from a terminal")
 	}
 	err := huh.NewForm(

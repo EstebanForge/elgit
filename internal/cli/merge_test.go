@@ -280,6 +280,22 @@ func TestMergeDirtyTreeRefusedBeforePickerNetwork(t *testing.T) {
 	}
 }
 
+func TestMergePickerAbortExitsQuietly(t *testing.T) {
+	dir := setupRepo(t)
+	// Regression: closed stdin surfaced raw "selection aborted" and exit
+	// 1. Backing out of a menu is not an error; it matches elgit sw.
+	out, err := execute(t, dir, "merge")
+	if err != nil {
+		t.Fatalf("aborting the picker should exit 0, got %v", err)
+	}
+	if strings.Contains(out, "selection aborted") {
+		t.Errorf("output %q should not surface the abort", out)
+	}
+	if !strings.Contains(out, "Fetching branches") {
+		t.Errorf("output %q should name the fetch", out)
+	}
+}
+
 func TestMergeUnknownBranch(t *testing.T) {
 	dir := setupRepo(t)
 	_, err := execute(t, dir, "merge", "nope")

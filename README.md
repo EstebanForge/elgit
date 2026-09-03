@@ -46,7 +46,7 @@ elgit commit               # stage modified tracked files, one commit (-m for sc
 elgit merge <branch>       # compare with a branch, then merge it into the current one
 elgit status               # branch, upstream distance, working tree summary
 elgit pub                  # publish the current branch to the remote (push -u)
-elgit unpub <branch>       # delete the branch on the remote
+elgit unpub [branch]       # delete the branch on the remote (picker of published branches on a terminal)
 elgit undo                 # undo the last commit (--hard also discards its changes)
 elgit branches [pattern]   # list branches with publication state
 elgit config               # show effective settings and where they come from
@@ -61,6 +61,8 @@ With aliases installed, `git sync`, `git sw feature`, and bare `git sw` (the int
 `elgit commit` is the Desktop commit button: it stages every modified tracked file and creates exactly one commit. Untracked files join only with `--all`, so a stray scratch file never rides into history. `-m` takes the summary, `-d` the optional longer description; with neither, a terminal gets a two-field prompt (summary required, description optional) and a non-terminal gets an error, so scripts never stall. `--amend` rewords or folds staged work into the last commit. Commit never pushes.
 
 `elgit merge` is the Desktop compare tab: it names the incoming commits ("Merging 7 commits from stage into main"), then merges with a plain `git merge`, so your `merge.ff` config decides fast-forward versus merge commit. Without an argument a picker lists branches with ahead/behind counts (one `for-each-ref` call, git 2.29+; older git lists without counts). Remote-only branches merge straight from their remote-tracking ref, fetched first so the counts are current. An already-merged candidate short-circuits with "Already up to date." Merge never pushes: run `elgit sync` after.
+
+`elgit unpub` without an argument opens the same picker over the published branches, after a fresh `fetch --prune`, with the current branch marked. It is the one picker without a non-terminal fallback: it deletes a remote ref, so scripts name the branch, and nothing is ever deleted through a prompt.
 
 `elgit status` (alias `st`) is the opening glance: current branch, upstream distance in ahead/behind, and a staged/modified/untracked summary. Read-only; no network.
 
