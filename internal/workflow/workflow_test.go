@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -172,7 +173,7 @@ func TestSyncNoopWhenCurrent(t *testing.T) {
 	w, buf, _, _ := setup(t)
 	ctx := context.Background()
 
-	if err := w.Sync(ctx, ""); err != nil {
+	if err := w.Sync(ctx, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(buf.String(), "Pushing") {
@@ -191,7 +192,7 @@ func TestSyncPushesLocalCommits(t *testing.T) {
 	runGit(t, work, "add", ".")
 	runGit(t, work, "commit", "-m", "local commit")
 
-	if err := w.Sync(ctx, ""); err != nil {
+	if err := w.Sync(ctx, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := queryGit(t, work, "rev-list", "--count", "origin/main..main"); got != "0" {
@@ -210,7 +211,7 @@ func TestSyncRebasesOntoRemote(t *testing.T) {
 	runGit(t, work, "add", ".")
 	runGit(t, work, "commit", "-m", "local commit")
 
-	if err := w.Sync(ctx, ""); err != nil {
+	if err := w.Sync(ctx, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"p.txt", "l.txt"} {
@@ -233,7 +234,7 @@ func TestSyncConflictStopsAndKeepsState(t *testing.T) {
 	runGit(t, work, "add", ".")
 	runGit(t, work, "commit", "-m", "local change")
 
-	err := w.Sync(ctx, "")
+	err := w.Sync(ctx, SyncOptions{})
 	if err == nil {
 		t.Fatal("expected conflict error")
 	}
@@ -264,7 +265,7 @@ func TestSyncFakeChangesNothing(t *testing.T) {
 	var buf bytes.Buffer
 	w := New(repo.Open(g), &buf)
 
-	if err := w.Sync(ctx, ""); err != nil {
+	if err := w.Sync(ctx, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, filepath.Join(work, "a.txt")); got != "dirty\n" {
@@ -286,7 +287,7 @@ func TestSyncExternalBranchRoundTrip(t *testing.T) {
 	runGit(t, work, "push", "-u", "origin", "feature")
 	peerCommit(t, base, "p.txt", "peer\n")
 
-	if err := w.Sync(ctx, "feature"); err != nil {
+	if err := w.Sync(ctx, SyncOptions{Target: "feature"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := queryGit(t, work, "rev-parse", "--abbrev-ref", "HEAD"); got != "main" {
@@ -296,7 +297,7 @@ func TestSyncExternalBranchRoundTrip(t *testing.T) {
 
 func TestSyncUnpublishedBranch(t *testing.T) {
 	w, _, _, _ := setup(t)
-	err := w.Sync(context.Background(), "feature")
+	err := w.Sync(context.Background(), SyncOptions{Target: "feature"})
 	if err == nil || !strings.Contains(err.Error(), "not published") {
 		t.Fatalf("err = %v, want not-published error", err)
 	}
@@ -452,7 +453,7 @@ func TestFakeSyncWritesNothingToGitDir(t *testing.T) {
 	g.Echo = &echo
 	var buf bytes.Buffer
 	w := New(repo.Open(g), &buf)
-	if err := w.Sync(ctx, ""); err != nil {
+	if err := w.Sync(ctx, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -545,10 +546,307 @@ func TestPullRebaseMergesHonored(t *testing.T) {
 	g.Echo = &echo
 	var buf bytes.Buffer
 	w := New(repo.Open(g), &buf)
-	if err := w.Sync(ctx, ""); err != nil {
+	if err := w.Sync(ctx, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(echo.String(), "git rebase refs/remotes/origin/main") {
 		t.Errorf("echo = %q, want rebase chosen via pull.rebase=merges", echo.String())
+	}
+}
+
+// stashShim prepends a directory to PATH whose git intercepts
+// `git stash push --include-untracked` and runs body in its place, with
+// $REAL bound to the real git. It injects concurrent-actor actions into
+// the push-to-readback window that the elgit lock cannot exclude.
+func stashShim(t *testing.T, body string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	script := `#!/bin/sh
+REAL=` + realGit + `
+if [ "$1" = stash ] && [ "$2" = push ] && [ "$3" = --include-untracked ]; then
+` + body + `
+fi
+exec "$REAL" "$@"
+`
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestStashAwayRefusesForeignTop covers the hijack window: a concurrent
+// git stash push landing between elgit's push and its read-back must
+// fail loudly instead of being recorded as elgit's own.
+func TestStashAwayRefusesForeignTop(t *testing.T) {
+	w, buf, _, work := setup(t)
+	ctx := context.Background()
+
+	stashShim(t, `"$REAL" "$@"
+rc=$?
+printf 'x' >> a.txt
+"$REAL" stash push -m "foreign concurrent stash" >/dev/null 2>&1
+exit $rc
+`)
+
+	writeFile(t, filepath.Join(work, "a.txt"), "dirty\n")
+	led, err := safety.LoadLedger(ctx, w.Repo.Git)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stashed, err := w.stashAway(ctx, led, "main", purposeSwitch)
+	if err == nil {
+		t.Fatalf("stashAway recorded a foreign top-of-stack stash (stashed=%v, buf=%q)", stashed, buf.String())
+	}
+	if !strings.Contains(err.Error(), "concurrent stash push") {
+		t.Errorf("err = %v, want a concurrent stash push report", err)
+	}
+
+	led2, err := safety.LoadLedger(ctx, w.Repo.Git)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := led2.Find("main", purposeSwitch); found {
+		t.Errorf("ledger recorded an entry for a stash elgit did not create")
+	}
+	// Both stashes survive for manual recovery.
+	out := queryGit(t, work, "stash", "list", "--format=%gs")
+	if !strings.Contains(out, "foreign concurrent stash") || !strings.Contains(out, "elgit: stashing before") {
+		t.Errorf("stash list lost an entry: %q", out)
+	}
+}
+
+// TestStashAwayNoopWithCleanedTree keeps the benign no-op: another actor
+// cleans the tree before elgit's push runs, the push stashes nothing,
+// and a pre-existing elgit stash stays untouched on the stack.
+func TestStashAwayNoopWithCleanedTree(t *testing.T) {
+	w, buf, _, work := setup(t)
+	ctx := context.Background()
+
+	stashShim(t, `"$REAL" checkout -- a.txt
+"$REAL" "$@"
+`)
+
+	runGit(t, work, "stash", "push", "-m", "elgit: stashing before switching main [123]")
+	writeFile(t, filepath.Join(work, "a.txt"), "dirty\n")
+
+	led, err := safety.LoadLedger(ctx, w.Repo.Git)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, stashed, err := w.stashAway(ctx, led, "main", purposeSwitch)
+	if err != nil {
+		t.Fatalf("stashAway: %v", err)
+	}
+	if stashed || entry.StashOID != "" {
+		t.Errorf("stashAway = (%+v, %v), want no stash for a no-op push", entry, stashed)
+	}
+	if len(led.Entries) != 0 {
+		t.Errorf("ledger gained %+v on a no-op push", led.Entries)
+	}
+	if !strings.Contains(buf.String(), "Saving local changes.") {
+		t.Errorf("buf = %q, want the saving notice", buf.String())
+	}
+}
+
+// TestStrategySide pins the ours/theirs inversion: a rebase replays
+// local commits onto the remote, so the remote side is "ours" there and
+// "theirs" in a merge.
+func TestStrategySide(t *testing.T) {
+	cases := []struct {
+		verb   string
+		prefer Prefer
+		want   string
+	}{
+		{"rebase", PreferRemote, "ours"},
+		{"rebase", PreferLocal, "theirs"},
+		{"merge", PreferRemote, "theirs"},
+		{"merge", PreferLocal, "ours"},
+	}
+	for _, c := range cases {
+		if got := strategySide(c.verb, c.prefer); got != c.want {
+			t.Errorf("strategySide(%s, %s) = %s, want %s", c.verb, c.prefer, got, c.want)
+		}
+	}
+}
+
+// divergedMain stages the classic conflict: a peer rewrote a.txt on the
+// remote while the local clone rewrote the same line and committed.
+func divergedMain(t *testing.T, base, work string) {
+	t.Helper()
+	peerCommit(t, base, "a.txt", "remote\n")
+	writeFile(t, filepath.Join(work, "a.txt"), "local\n")
+	runGit(t, work, "add", ".")
+	runGit(t, work, "commit", "-m", "local: rewrite a.txt")
+}
+
+// TestSyncPreferRemoteResolvesConflict covers a diverged main: prefer
+// remote auto-resolves the colliding hunk with the remote side and
+// pushes the rebased branch.
+func TestSyncPreferRemoteResolvesConflict(t *testing.T) {
+	w, buf, base, work := setup(t)
+	ctx := context.Background()
+
+	divergedMain(t, base, work)
+	if err := w.Sync(ctx, SyncOptions{Prefer: PreferRemote}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := readFile(t, filepath.Join(work, "a.txt")); got != "remote\n" {
+		t.Errorf("a.txt = %q, want the remote side to win", got)
+	}
+	if !strings.Contains(buf.String(), "prefer remote") {
+		t.Errorf("buf = %q, want the strategy named", buf.String())
+	}
+	if local, remote := queryGit(t, work, "rev-parse", "HEAD"), queryGit(t, work, "rev-parse", "refs/remotes/origin/main"); local != remote {
+		t.Errorf("push missing: local %s != remote %s", local, remote)
+	}
+	if out := queryGit(t, work, "status", "--porcelain"); out != "" {
+		t.Errorf("dirty after sync: %q", out)
+	}
+}
+
+// TestSyncPreferLocalResolvesConflict mirrors prefer remote: the local
+// side wins colliding hunks.
+func TestSyncPreferLocalResolvesConflict(t *testing.T) {
+	w, _, base, work := setup(t)
+	ctx := context.Background()
+
+	divergedMain(t, base, work)
+	if err := w.Sync(ctx, SyncOptions{Prefer: PreferLocal}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := readFile(t, filepath.Join(work, "a.txt")); got != "local\n" {
+		t.Errorf("a.txt = %q, want the local side to win", got)
+	}
+	if local, remote := queryGit(t, work, "rev-parse", "HEAD"), queryGit(t, work, "rev-parse", "refs/remotes/origin/main"); local != remote {
+		t.Errorf("push missing: local %s != remote %s", local, remote)
+	}
+}
+
+// TestSyncAskDecidesStrategy covers the pre-stash prompt: it fires only
+// when both sides moved, receives the counts, and its choice drives the
+// integration.
+func TestSyncAskDecidesStrategy(t *testing.T) {
+	w, _, base, work := setup(t)
+	ctx := context.Background()
+
+	divergedMain(t, base, work)
+
+	calls := 0
+	var gotRemoteAhead, gotLocalAhead int
+	ask := func(_, _ string, remoteAhead, localAhead int) (Prefer, error) {
+		calls++
+		gotRemoteAhead, gotLocalAhead = remoteAhead, localAhead
+		return PreferRemote, nil
+	}
+	if err := w.Sync(ctx, SyncOptions{Ask: ask}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("ask ran %d times, want 1", calls)
+	}
+	if gotRemoteAhead != 1 || gotLocalAhead != 1 {
+		t.Errorf("counts = (%d, %d), want (1, 1)", gotRemoteAhead, gotLocalAhead)
+	}
+	if got := readFile(t, filepath.Join(work, "a.txt")); got != "remote\n" {
+		t.Errorf("a.txt = %q, want the asked-for side to win", got)
+	}
+}
+
+// TestSyncAskSkippedOnFastForward: with no local commits there is
+// nothing to conflict, so the prompt must not fire.
+func TestSyncAskSkippedOnFastForward(t *testing.T) {
+	w, _, base, _ := setup(t)
+	ctx := context.Background()
+
+	peerCommit(t, base, "p.txt", "peer\n")
+	calls := 0
+	ask := func(_, _ string, _, _ int) (Prefer, error) {
+		calls++
+		return PreferRemote, nil
+	}
+	if err := w.Sync(ctx, SyncOptions{Ask: ask}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("ask ran %d times on a fast-forward, want 0", calls)
+	}
+}
+
+// TestSyncAskAbortLeavesTreeAlone pins the fetch-first order: the ask
+// runs before anything is stashed, so aborting it changes nothing.
+func TestSyncAskAbortLeavesTreeAlone(t *testing.T) {
+	w, _, base, work := setup(t)
+	ctx := context.Background()
+
+	divergedMain(t, base, work)
+	head := queryGit(t, work, "rev-parse", "HEAD")
+
+	ask := func(_, _ string, _, _ int) (Prefer, error) {
+		return PreferNone, errors.New("user aborted")
+	}
+	err := w.Sync(ctx, SyncOptions{Ask: ask})
+	if err == nil || !strings.Contains(err.Error(), "user aborted") {
+		t.Fatalf("err = %v, want the abort error", err)
+	}
+	if out := queryGit(t, work, "status", "--porcelain"); out != "" {
+		t.Errorf("tree changed despite abort: %q", out)
+	}
+	if out := queryGit(t, work, "stash", "list"); out != "" {
+		t.Errorf("stash created despite abort: %q", out)
+	}
+	if queryGit(t, work, "rev-parse", "HEAD") != head {
+		t.Error("HEAD moved despite abort")
+	}
+}
+
+// TestSyncAskAbortExternalTargetStaysPut: aborting the ask must be a
+// zero-side-effect exit even for an external target branch, so the ask
+// runs before the switch that parks the starting branch's work.
+func TestSyncAskAbortExternalTargetStaysPut(t *testing.T) {
+	w, _, base, work := setup(t)
+	ctx := context.Background()
+
+	runGit(t, work, "push", "-u", "origin", "feature")
+	runGit(t, base, "clone", filepath.Join(base, "remote.git"), filepath.Join(base, "peer"))
+	peer := filepath.Join(base, "peer")
+	runGit(t, peer, "config", "user.name", "Peer")
+	runGit(t, peer, "config", "user.email", "peer@example.com")
+	writeFile(t, filepath.Join(peer, "a.txt"), "remote\n")
+	runGit(t, peer, "add", ".")
+	runGit(t, peer, "commit", "-m", "peer: rewrite a.txt")
+	runGit(t, peer, "push", "origin", "HEAD:refs/heads/feature")
+	runGit(t, work, "checkout", "-q", "feature")
+	writeFile(t, filepath.Join(work, "a.txt"), "local\n")
+	runGit(t, work, "add", ".")
+	runGit(t, work, "commit", "-m", "local: rewrite a.txt")
+	runGit(t, work, "checkout", "-q", "main")
+	writeFile(t, filepath.Join(work, "a.txt"), "dirty\n")
+
+	var gotBranch string
+	var gotAhead, gotLocal int
+	ask := func(_, branch string, remoteAhead, localAhead int) (Prefer, error) {
+		gotBranch = branch
+		gotAhead, gotLocal = remoteAhead, localAhead
+		return PreferNone, errors.New("user aborted")
+	}
+	err := w.Sync(ctx, SyncOptions{Target: "feature", Ask: ask})
+	if err == nil || !strings.Contains(err.Error(), "user aborted") {
+		t.Fatalf("err = %v, want the abort error", err)
+	}
+	if gotBranch != "feature" || gotAhead != 1 || gotLocal != 1 {
+		t.Errorf("ask saw branch %q counts (%d, %d), want feature (1, 1)", gotBranch, gotAhead, gotLocal)
+	}
+	if got := queryGit(t, work, "rev-parse", "--abbrev-ref", "HEAD"); got != "main" {
+		t.Errorf("branch = %q, want to stay on main after the abort", got)
+	}
+	if got := readFile(t, filepath.Join(work, "a.txt")); got != "dirty\n" {
+		t.Errorf("a.txt = %q, want the dirty worktree untouched", got)
+	}
+	if out := queryGit(t, work, "stash", "list"); out != "" {
+		t.Errorf("stash created despite abort: %q", out)
 	}
 }

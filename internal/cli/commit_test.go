@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -320,5 +321,64 @@ func TestCommitRequiresMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "-m") {
 		t.Errorf("error %q should point at -m", err)
+	}
+}
+
+// TestCommitDetachedWarnsParkedStashes covers the warning gap: with HEAD
+// detached, withLock cannot filter the ledger by branch, so every parked
+// entry must warn instead of staying silent.
+func TestCommitDetachedWarnsParkedStashes(t *testing.T) {
+	dir := setupRepo(t)
+	ctx := context.Background()
+	g := &gitx.Runner{Dir: dir}
+
+	if err := os.WriteFile(filepath.Join(dir, "parked.txt"), []byte("parked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Mutate(ctx, "stash", "push", "--include-untracked", "-m", "elgit: stashing before switching main [1]"); err != nil {
+		t.Fatal(err)
+	}
+	oid, err := g.Query(ctx, "rev-parse", "stash@{0}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerDir := filepath.Join(dir, ".git", "elgit")
+	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := fmt.Sprintf(`[{"stash_oid": %q, "branch": "main", "purpose": "switching", "created": "2026-01-01T00:00:00Z"}]`, strings.TrimSpace(oid))
+	if err := os.WriteFile(filepath.Join(ledgerDir, "ledger.json"), []byte(entry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := g.Mutate(ctx, "checkout", "--detach"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := execute(t, dir, "--fake", "commit", "-m", "x")
+	if err == nil {
+		t.Fatal("commit on a detached HEAD should fail")
+	}
+	if !strings.Contains(out, `branch "main"`) {
+		t.Errorf("out = %q, want the parked-stash warning for main on detached HEAD", out)
+	}
+}
+
+// TestSyncPreferValidation covers the flag surface: unknown values are
+// rejected before any work, known values run the fake flow cleanly.
+func TestSyncPreferValidation(t *testing.T) {
+	dir := setupRepo(t)
+
+	_, err := execute(t, dir, "--fake", "sync", "--prefer", "theirs")
+	if err == nil || !strings.Contains(err.Error(), "--prefer") {
+		t.Fatalf("err = %v, want a --prefer validation error", err)
+	}
+
+	out, err := execute(t, dir, "--fake", "sync", "--prefer", "remote")
+	if err != nil {
+		t.Fatalf("sync --prefer remote (fake): %v", err)
+	}
+	if !strings.Contains(out, "Fetching") {
+		t.Errorf("out = %q, want the fake flow to run", out)
 	}
 }

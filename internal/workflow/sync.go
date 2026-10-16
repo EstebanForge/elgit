@@ -27,10 +27,43 @@ type syncState struct {
 	hasParked bool
 }
 
-// Sync synchronizes a branch with its remote: stash, fetch, integrate
-// (merge or rebase), push, restore. With a target branch it switches
-// there first and returns to the original branch afterwards.
-func (w *Workflow) Sync(ctx context.Context, target string) error {
+// Prefer names the side that wins colliding hunks during integrate.
+type Prefer string
+
+const (
+	// PreferNone stops on conflict for manual resolution: the default,
+	// and what "resolve manually" in the ask maps to.
+	PreferNone Prefer = ""
+	// PreferRemote favors the remote side of a colliding hunk: the right
+	// default for a shared branch like main.
+	PreferRemote Prefer = "remote"
+	// PreferLocal favors the local side of a colliding hunk.
+	PreferLocal Prefer = "local"
+)
+
+// StrategyAsk decides a conflict side after the fetch revealed both
+// sides moved (remoteAhead and localAhead are commit counts). It runs
+// before anything changes — no switch, no stash — so aborting it leaves
+// the repository exactly as it was.
+type StrategyAsk func(remote, branch string, remoteAhead, localAhead int) (Prefer, error)
+
+// SyncOptions carries the sync inputs.
+type SyncOptions struct {
+	Target string
+	// Prefer fixes the conflict side up front; empty defers to Ask, and
+	// to manual resolution when no Ask is set.
+	Prefer Prefer
+	// Ask is consulted only on a diverged branch (both sides moved);
+	// the cli wires it to a terminal prompt.
+	Ask StrategyAsk
+}
+
+// Sync synchronizes a branch with its remote: fetch, ask when diverged,
+// switch (external target), stash, integrate (merge or rebase), push,
+// restore. Fetch and the strategy ask run before the switch and the
+// stash, so aborting the ask is a zero-side-effect exit even for an
+// external target.
+func (w *Workflow) Sync(ctx context.Context, opts SyncOptions) error {
 	if err := w.guard(ctx); err != nil {
 		return err
 	}
@@ -45,10 +78,10 @@ func (w *Workflow) Sync(ctx context.Context, target string) error {
 
 	branch := current
 	external := false
-	if target != "" {
-		matched, found := w.Repo.FuzzyMatchBranch(ctx, remote, target)
+	if opts.Target != "" {
+		matched, found := w.Repo.FuzzyMatchBranch(ctx, remote, opts.Target)
 		if !found {
-			return fmt.Errorf("branch %q does not exist", target)
+			return fmt.Errorf("branch %q does not exist", opts.Target)
 		}
 		if matched != current {
 			branch = matched
@@ -66,6 +99,30 @@ func (w *Workflow) Sync(ctx context.Context, target string) error {
 	}
 
 	state := &syncState{led: led, branch: branch}
+	remoteRef := w.Repo.RemoteRef(remote, branch)
+
+	// Fetch and ask before the switch and the stash: the ask's counts
+	// read the target branch's refs, and an abort must leave the repo
+	// exactly where it was.
+	w.printf("Fetching %s.", remote)
+	if _, err := w.Repo.Git.Mutate(ctx, "fetch", remote); err != nil && !w.Repo.Git.FakeOK(err) {
+		return w.syncFail(ctx, state, false, err)
+	}
+
+	prefer := opts.Prefer
+	if prefer == PreferNone && opts.Ask != nil && !w.Repo.Git.Fake {
+		remoteAhead, localAhead, err := w.Repo.AheadBehind(ctx, remoteRef, w.Repo.BranchRef(branch))
+		if err != nil {
+			return w.syncFail(ctx, state, false, err)
+		}
+		if remoteAhead > 0 && localAhead > 0 {
+			prefer, err = opts.Ask(remote, branch, remoteAhead, localAhead)
+			if err != nil {
+				return w.syncFail(ctx, state, false, err)
+			}
+		}
+	}
+
 	if external {
 		if err := w.Switch(ctx, branch); err != nil {
 			return err
@@ -80,17 +137,11 @@ func (w *Workflow) Sync(ctx context.Context, target string) error {
 
 	stashed, hadStash, err := w.stashAway(ctx, led, branch, purposeSync)
 	if err != nil {
-		return err
+		return w.syncFail(ctx, state, false, err)
 	}
 	state.stashed, state.hadStash = stashed, hadStash
 
-	w.printf("Fetching %s.", remote)
-	if _, err := w.Repo.Git.Mutate(ctx, "fetch", remote); err != nil && !w.Repo.Git.FakeOK(err) {
-		return w.syncFail(ctx, state, true, err)
-	}
-
-	remoteRef := w.Repo.RemoteRef(remote, branch)
-	if _, err := w.integrate(ctx, remoteRef); err != nil {
+	if _, err := w.integrate(ctx, remoteRef, prefer); err != nil {
 		var conflict *ConflictError
 		if errors.As(err, &conflict) {
 			// The tree is conflicted; restoring the stash on top would
@@ -143,8 +194,11 @@ func (w *Workflow) syncFail(ctx context.Context, s *syncState, tryRestore bool, 
 // contains merge commits, else rebase. legit.smartMerge=false defers to
 // pull.rebase and pull.ff instead. remoteRef must be a fully qualified ref
 // (refs/remotes/<remote>/<branch>) so branch names can never be read as
-// git options.
-func (w *Workflow) integrate(ctx context.Context, remoteRef string) (bool, error) {
+// git options. prefer resolves colliding hunks in favor of one side and
+// must never surface git's ours/theirs naming: the pair inverts between
+// verbs, because a rebase replays local commits onto the remote, making
+// the remote side "ours" there and "theirs" in a merge.
+func (w *Workflow) integrate(ctx context.Context, remoteRef string, prefer Prefer) (bool, error) {
 	g := w.Repo.Git
 
 	if g.Ok(ctx, "merge-base", "--is-ancestor", remoteRef, "HEAD") {
@@ -166,10 +220,17 @@ func (w *Workflow) integrate(ctx context.Context, remoteRef string) (bool, error
 		verb = "rebase"
 	}
 
-	w.printf("Integrating %s (%s).", remoteRef, verb)
 	argv := []string{verb}
+	if side := strategySide(verb, prefer); side != "" {
+		argv = append(argv, "-X", side)
+	}
 	if verb == "merge" && w.Repo.ConfigString(ctx, "pull.ff") == "only" {
 		argv = append(argv, "--ff-only")
+	}
+	if prefer == PreferNone {
+		w.printf("Integrating %s (%s).", remoteRef, verb)
+	} else {
+		w.printf("Integrating %s (%s, prefer %s).", remoteRef, verb, prefer)
 	}
 	argv = append(argv, remoteRef)
 
@@ -184,6 +245,20 @@ func (w *Workflow) integrate(ctx context.Context, remoteRef string) (bool, error
 		return true, err
 	}
 	return true, nil
+}
+
+// strategySide maps a semantic side to git's -X value for the verb, ""
+// when no side is fixed. See integrate for why the pair inverts.
+func strategySide(verb string, prefer Prefer) string {
+	remoteIsOurs := verb == "rebase"
+	switch {
+	case prefer == PreferNone:
+		return ""
+	case prefer == PreferRemote && remoteIsOurs, prefer == PreferLocal && !remoteIsOurs:
+		return "ours"
+	default:
+		return "theirs"
+	}
 }
 
 // pullRebaseWanted honors pull.rebase values that mean "rebase", including

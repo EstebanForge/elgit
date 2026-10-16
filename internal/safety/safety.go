@@ -227,11 +227,12 @@ func (l *Ledger) Remove(oid string) error {
 }
 
 // WarnPending prints entries for the given branch whose stashes may still
-// be waiting. Entries parked on other branches are normal (a stash travels
+// be waiting. An empty branch (detached HEAD) warns about every entry.
+// Entries parked on other branches are normal (a stash travels
 // with its branch and restores when you return to it), so they stay silent.
 func (l *Ledger) WarnPending(out io.Writer, branch string) {
 	for _, e := range l.Entries {
-		if e.Branch != branch {
+		if branch != "" && e.Branch != branch {
 			continue
 		}
 		_, _ = fmt.Fprintf(out, "unrestored elgit stash from %s: branch %q, stash %s (git stash list)\n", //nolint:errcheck // warning output; delivery is best-effort
@@ -252,16 +253,6 @@ func (l *Ledger) save() error {
 		return err
 	}
 	return os.Rename(tmp, l.path)
-}
-
-// NewStashOID returns the commit OID of the most recent stash entry. Call
-// right after creating a stash, before anything else can touch the stack.
-func NewStashOID(ctx context.Context, g *gitx.Runner) (string, error) {
-	out, err := g.Query(ctx, "rev-parse", "--verify", "--quiet", "stash@{0}")
-	if err != nil {
-		return "", errors.New("stash was created but its commit cannot be resolved; inspect: git stash list")
-	}
-	return strings.TrimSpace(out), nil
 }
 
 // StashIndexByOID locates a stash commit on the current stack and returns

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/EstebanForge/elgit/internal/gitx"
 )
@@ -334,15 +335,40 @@ func TestStashIndexByOID(t *testing.T) {
 	if _, err := g.Mutate(ctx, "stash", "push", "-m", "test stash"); err != nil {
 		t.Fatal(err)
 	}
-	oid, err := NewStashOID(ctx, g)
+	out, err := g.Query(ctx, "rev-parse", "stash@{0}")
 	if err != nil {
 		t.Fatal(err)
 	}
+	oid := strings.TrimSpace(out)
 	idx, ok := StashIndexByOID(ctx, g, oid)
 	if !ok || idx != 0 {
 		t.Errorf("StashIndexByOID = (%d, %v), want (0, true)", idx, ok)
 	}
 	if _, ok := StashIndexByOID(ctx, g, "0000000000000000000000000000000000000000"); ok {
 		t.Error("StashIndexByOID for unknown OID should miss")
+	}
+}
+
+// TestWarnPendingEmptyBranchWarnsAll covers detached HEAD: with no branch
+// name to filter by, every parked entry must warn instead of staying
+// silent.
+func TestWarnPendingEmptyBranchWarnsAll(t *testing.T) {
+	l := &Ledger{Entries: []Entry{
+		{StashOID: strings.Repeat("a", 40), Branch: "main", Created: time.Unix(0, 0).UTC()},
+		{StashOID: strings.Repeat("b", 40), Branch: "feature", Created: time.Unix(0, 0).UTC()},
+	}}
+
+	var all bytes.Buffer
+	l.WarnPending(&all, "")
+	for _, want := range []string{`branch "main"`, `branch "feature"`} {
+		if !strings.Contains(all.String(), want) {
+			t.Errorf("WarnPending(\"\") = %q, want it to name %s", all.String(), want)
+		}
+	}
+
+	var onlyMain bytes.Buffer
+	l.WarnPending(&onlyMain, "main")
+	if strings.Contains(onlyMain.String(), "feature") {
+		t.Errorf("WarnPending(main) = %q, want no feature entry", onlyMain.String())
 	}
 }

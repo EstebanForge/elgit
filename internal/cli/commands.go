@@ -95,25 +95,44 @@ func switchInteractive(ctx context.Context, cmd *cobra.Command, w *workflow.Work
 }
 
 func newSyncCmd(runner func() *gitx.Runner) *cobra.Command {
-	return &cobra.Command{
+	var prefer string
+	cmd := &cobra.Command{
 		Use:     "sync [branch]",
 		Aliases: []string{"sy"},
 		Short:   "Stash, fetch, merge or rebase, push, restore",
 		Long: "Synchronizes a branch with its remote: stashes uncommitted work, fetches,\n" +
 			"integrates remote commits (rebase for linear history, merge when the local\n" +
 			"side has merge commits), pushes, and restores the stash.\n" +
-			"With a branch argument it switches there first and returns afterwards.",
+			"With a branch argument it switches there first and returns afterwards.\n" +
+			"On a diverged branch, --prefer names the side that wins colliding hunks\n" +
+			"(remote or local); without it, a terminal asks and scripts stop on conflict.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			branch := ""
 			if len(args) == 1 {
 				branch = args[0]
 			}
+			var ask workflow.StrategyAsk
+			switch workflow.Prefer(prefer) {
+			case workflow.PreferRemote, workflow.PreferLocal:
+			case workflow.PreferNone:
+				ask = func(remote, branch string, remoteAhead, localAhead int) (workflow.Prefer, error) {
+					return askPrefer(cmd, remote, branch, remoteAhead, localAhead)
+				}
+			default:
+				return fmt.Errorf("invalid --prefer %q; use \"remote\" or \"local\"", prefer)
+			}
 			return withLock(cmd, runner(), func(ctx context.Context, w *workflow.Workflow) error {
-				return w.Sync(ctx, branch)
+				err := w.Sync(ctx, workflow.SyncOptions{Target: branch, Prefer: workflow.Prefer(prefer), Ask: ask})
+				if errors.Is(err, picker.ErrAborted) {
+					return nil // user backed out of the strategy ask
+				}
+				return err
 			})
 		},
 	}
+	cmd.Flags().StringVar(&prefer, "prefer", "", `side that wins colliding hunks: "remote" or "local"`)
+	return cmd
 }
 
 func newPublishCmd(runner func() *gitx.Runner) *cobra.Command {

@@ -46,6 +46,25 @@ func (r *Repo) StatusCounts(ctx context.Context) (StatusCounts, error) {
 	return counts, nil
 }
 
+// UntrackedFiles lists untracked, non-ignored files as raw paths. The
+// status listing collapses an untracked directory to a single "dir/"
+// entry; expanding content needs the individual file paths. -z keeps
+// unusual names byte-exact (quoting would corrupt them) and ":/" lists
+// from the repository root regardless of the working directory.
+func (r *Repo) UntrackedFiles(ctx context.Context) ([]string, error) {
+	out, err := r.Git.Query(ctx, "--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z", ":/")
+	if err != nil {
+		return nil, fmt.Errorf("ls-files: %w", err)
+	}
+	var files []string
+	for _, path := range strings.Split(out, "\x00") {
+		if path != "" {
+			files = append(files, path)
+		}
+	}
+	return files, nil
+}
+
 // AheadBehind counts commits unique to each side of a symmetric range:
 // ahead is reachable from left only, behind from right only. Both refs
 // must be resolvable (HEAD, a branch, or a fully qualified ref).

@@ -79,10 +79,27 @@ func (r *Runner) Ok(ctx context.Context, argv ...string) bool {
 	return err == nil
 }
 
-// run executes one git command.
+// Stream runs a read-only command with stdout attached to w instead of a
+// buffer, so git sees the real stdout device: on a terminal it applies
+// the user's pager and color configuration itself. Queries execute even
+// in fake mode. A nonzero exit returns *Error; callers decide whether an
+// exit code is fatal (git diff --no-index exits 1 to report differences).
+func (r *Runner) Stream(ctx context.Context, w io.Writer, argv ...string) error {
+	return r.stream(ctx, w, argv)
+}
+
+// run executes one git command and captures stdout.
 func (r *Runner) run(ctx context.Context, argv []string) (string, error) {
+	var stdout bytes.Buffer
+	err := r.stream(ctx, &stdout, argv)
+	return stdout.String(), err
+}
+
+// stream executes one git command with stdout written to w; stderr is
+// buffered so failures report it.
+func (r *Runner) stream(ctx context.Context, w io.Writer, argv []string) error {
 	if len(argv) == 0 {
-		return "", errors.New("gitx: empty argv")
+		return errors.New("gitx: empty argv")
 	}
 	binary := r.Git
 	if binary == "" {
@@ -99,24 +116,23 @@ func (r *Runner) run(ctx context.Context, argv []string) (string, error) {
 	}
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
+	cmd.Stdout = w
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			gErr := &Error{
-				Argv:     argv,
-				ExitCode: exitErr.ExitCode(),
-				Stderr:   stderr.String(),
-			}
-			return stdout.String(), gErr
-		}
-		return "", fmt.Errorf("gitx: run %v: %w", argv, err)
+	if err == nil {
+		return nil
 	}
-	return stdout.String(), nil
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return &Error{
+			Argv:     argv,
+			ExitCode: exitErr.ExitCode(),
+			Stderr:   stderr.String(),
+		}
+	}
+	return fmt.Errorf("gitx: run %v: %w", argv, err)
 }
 
 func (r *Runner) echo(prefix string, argv []string) {

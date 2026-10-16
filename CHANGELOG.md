@@ -2,6 +2,24 @@
 
 All notable changes to elgit are documented here. The format follows the release-notes markers consumed by the release workflow: each version's notes sit between `RELEASE:START` and `RELEASE:END` comments and become the GitHub Release body verbatim.
 
+<!-- RELEASE:START 0.3.0 -->
+## 0.3.0 - 2026-10-16
+
+### Changed
+
+- `elgit sync` gains a conflict strategy for diverged branches: `--prefer remote` or `--prefer local` decides colliding hunks in favor of one side, mapped per verb because git's naming inverts (a rebase's remote side is `ours`, a merge's is `theirs`). Without the flag, a terminal asks when both sides moved, and the ask runs before anything is stashed or any branch is switched, so backing out changes nothing; the fetch itself runs before the stash, so a failed fetch has nothing to unwind. Scripts without a terminal keep the stop-on-conflict behavior. Only colliding hunks are decided: commits survive, and a conflict `-X` cannot settle still stops the run.
+
+### New commands
+
+- `elgit diff` (`df`) reviews the uncommitted tree in one command: a file list with per-file `+`/`-` counts (one porcelain call merged with one numstat call, renames included), then the full diff against HEAD streamed untouched, so a terminal pages through your own `core.pager` (delta included) and piped output stays plain. Untracked files are listed but their contents stay out until `--all`, which diffs each against `/dev/null` (never `git add -N`: the index is never written) and survives any file name byte-for-byte. On an unborn HEAD the diff base is the empty tree, so staged and unstaged work both show.
+
+### Fixed
+
+- A concurrent `git stash push` landing between elgit's own push and its read-back could be recorded as elgit's and later restored, and dropped, on the wrong branch. The stash message now carries a per-run nonce verified against the stack top before anything is recorded; on a foreign push the run stops with both stashes named in `git stash list`.
+- Runs on a detached HEAD silently skipped the unrestored-stash warning; every parked stash now warns regardless of HEAD state.
+
+<!-- RELEASE:END 0.3.0 -->
+
 <!-- RELEASE:START 0.2.0 -->
 ## 0.2.0 - 2026-09-03
 

@@ -42,9 +42,12 @@ elgit sw                  # pick a branch interactively (filter + arrows); remot
 elgit sw <branch>         # switch directly, stashing and restoring local changes
 elgit sync                 # stash, fetch, merge-or-rebase, push, restore
 elgit sync <branch>        # sync another branch, then return to the current one
+elgit sync --prefer remote # diverged: the remote side wins colliding hunks (or local)
 elgit commit               # stage modified tracked files, one commit (-m for scripts, --all adds untracked)
 elgit merge [branch]       # compare with a branch, then merge it into the current one (bare: picker with ahead/behind)
 elgit status               # branch, upstream distance, working tree summary
+elgit diff                 # uncommitted changes with +/- counts, then the full diff
+elgit diff --all           # also show untracked file contents
 elgit pub                  # publish the current branch to the remote (push -u)
 elgit unpub [branch]       # delete the branch on the remote (picker of published branches on a terminal)
 elgit undo                 # undo the last commit (--hard also discards its changes)
@@ -64,9 +67,13 @@ Every remote wait before a menu shows a spinner with a message (`Fetching branch
 
 `elgit merge` is the Desktop compare tab: it names the incoming commits ("Merging 7 commits from stage into main"), then merges with a plain `git merge`, so your `merge.ff` config decides fast-forward versus merge commit. Without an argument a picker lists branches with ahead/behind counts (one `for-each-ref` call, git 2.29+; older git lists without counts). Remote-only branches merge straight from their remote-tracking ref, fetched first so the counts are current. An already-merged candidate short-circuits with "Already up to date." Merge never pushes: run `elgit sync` after.
 
+`elgit sync` is where divergence gets a policy. When the fetch shows both sides moved, a terminal asks which side wins colliding hunks: remote (for a shared branch like main), local, or resolve manually. `--prefer remote` or `--prefer local` fixes the answer for scripts, mapped per verb because git's naming inverts: a rebase replays your commits onto the remote, so prefer-remote is `-X ours` there and `-X theirs` in a merge. Either way only colliding hunks are decided, your commits survive, and a conflict `-X` cannot settle still stops the run. The ask runs before anything is stashed, so backing out of it changes nothing.
+
 `elgit unpub` without an argument opens the same picker over the published branches, after a fresh `fetch --prune`, with the current branch marked. It is the one picker without a non-terminal fallback: it deletes a remote ref, so scripts name the branch, and nothing is ever deleted through a prompt.
 
 `elgit status` (alias `st`) is the opening glance: current branch, upstream distance in ahead/behind, and a staged/modified/untracked summary. Read-only; no network.
+
+`elgit diff` (alias `df`) is the review of that glance: one line per uncommitted change with per-file `+`/`-` counts from `--numstat`, then the full diff against HEAD streamed untouched, so on a terminal it pages through your own `core.pager` (delta included) and piped output stays plain. Untracked files are listed but their contents stay out until `--all`, which diffs each one against `/dev/null` without staging anything. Read-only: the index is never written.
 
 ## Settings
 
@@ -81,15 +88,15 @@ elgit reads the standard git config hierarchy (repo, global, includes), `[legit]
 ## Safety rules
 
 1. Stashes are recorded by commit OID with branch and purpose. Restores apply by OID and drop only after a post-drop verification; a missing OID means the stash was already handled and the record is cleared.
-2. Merge and rebase conflicts stop the run. The conflicted state stays; the error prints the exact `git rebase --continue` / `--abort` commands and where the stash is. The stash is deliberately not restored onto a conflicted tree.
+2. Merge and rebase conflicts stop the run. The conflicted state stays; the error prints the exact `git rebase --continue` / `--abort` commands and where the stash is. The stash is deliberately not restored onto a conflicted tree. The one exception is an explicit side: `--prefer remote|local` (or the terminal ask) resolves colliding hunks in favor of that side; anything `-X` cannot settle still stops the run.
 3. elgit never force-pushes and never loops on a push race; it restores the stash (if any), reports, and exits.
 4. Mutating commands refuse to run while a merge, rebase, cherry-pick, revert, bisect, or am is in progress, and before the first commit exists. `elgit commit` is the deliberate exception to the no-first-commit rule: it is how the first commit happens.
 5. The stash ledger survives crashes. The next mutating run warns about unrestored entries with their OIDs.
 6. Undo warns when HEAD is a merge commit before removing it.
-7. A failed fetch or push restores the stashed work automatically: clean tree, original error, no lost context.
+7. A failed push restores the stashed work automatically: clean tree, original error, no lost context. A failed fetch happens before the stash, so there is nothing to unwind.
 8. `elgit commit` never pushes and stages tracked modifications only; untracked files join with `--all`, never by accident.
 9. `elgit merge` refuses a dirty working tree. There is no stash flow around a merge on purpose: a conflicted stash restore can never land on top of a committed merge, the one state `git merge --abort` cannot unwind.
-10. `commit` and `merge` are never installed as git aliases: both would shadow native git commands. `git status` stays native too.
+10. `commit`, `merge`, and `diff` are never installed as git aliases: all three would shadow native git commands. `git status` stays native too.
 
 ## Differences from legit
 

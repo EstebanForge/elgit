@@ -70,10 +70,11 @@ func (w *Workflow) remoteName(ctx context.Context) string {
 // Reports the entry and whether a stash was created. In fake mode the
 // stash is echoed only and nothing is recorded.
 //
-// The stash top OID is snapshotted before the push: if an external actor
-// cleans the tree between the dirty check and the push, git exits 0
-// having stashed nothing, and resolving stash@{0} would record whatever
-// stash was already on top. An unchanged top means nothing was stashed.
+// The push message carries a per-run nonce, checked against the stack
+// after the push: an unchanged top means the push stashed nothing (the
+// tree was cleaned underneath us); a changed top whose reflog message
+// lacks the nonce means a concurrent stash push landed in the window the
+// elgit lock cannot exclude. Neither may be recorded as elgit's own.
 func (w *Workflow) stashAway(ctx context.Context, led *safety.Ledger, branch, purpose string) (safety.Entry, bool, error) {
 	dirty, err := w.Repo.IsDirty(ctx)
 	if err != nil {
@@ -84,36 +85,51 @@ func (w *Workflow) stashAway(ctx context.Context, led *safety.Ledger, branch, pu
 	}
 
 	prevTop := stashTopOID(ctx, w.Repo.Git)
+	message := fmt.Sprintf("elgit: stashing before %s %s [%d]", purpose, branch, time.Now().UnixNano())
 
 	w.printf("Saving local changes.")
-	if _, err := w.Repo.Git.Mutate(ctx, "stash", "push", "--include-untracked", "-m",
-		fmt.Sprintf("elgit: stashing before %s %s", purpose, branch)); err != nil && !w.Repo.Git.FakeOK(err) {
+	if _, err := w.Repo.Git.Mutate(ctx, "stash", "push", "--include-untracked", "-m", message); err != nil && !w.Repo.Git.FakeOK(err) {
 		return safety.Entry{}, false, err
 	}
 	if w.Repo.Git.Fake {
 		return safety.Entry{}, false, nil
 	}
 
-	oid, err := safety.NewStashOID(ctx, w.Repo.Git)
-	if err != nil {
-		if prevTop == "" {
-			// The stack was empty and stays empty: the push had nothing to
-			// stash. Not an error, just nothing to record.
-			return safety.Entry{}, false, nil
-		}
-		return safety.Entry{}, false, err
-	}
-	if oid == prevTop {
-		// Push no-op'd (tree cleaned underneath us); do not hijack the
-		// previous stash entry.
+	head, subject, err := stashTopEntry(ctx, w.Repo.Git)
+	switch {
+	case err == nil && head == prevTop:
+		// The push no-op'd: nothing was stashed, nothing to record.
 		return safety.Entry{}, false, nil
+	case err != nil && prevTop == "":
+		// The stack was and stays empty: the push had nothing to stash.
+		return safety.Entry{}, false, nil
+	case err != nil:
+		return safety.Entry{}, false, fmt.Errorf("the stash stack cannot be read after the push; inspect: git stash list")
+	}
+	if !strings.Contains(subject, message) {
+		return safety.Entry{}, false, fmt.Errorf("a concurrent stash push landed on top of elgit's; nothing was recorded for automatic restore; both stashes are in git stash list (elgit's message: %s)", message)
 	}
 
-	entry := safety.Entry{StashOID: oid, Branch: branch, Purpose: purpose, Created: time.Now()}
+	entry := safety.Entry{StashOID: head, Branch: branch, Purpose: purpose, Created: time.Now()}
 	if err := led.Record(entry); err != nil {
 		return safety.Entry{}, false, err
 	}
 	return entry, true, nil
+}
+
+// stashTopEntry returns the commit OID and reflog subject of stash@{0}
+// from one query, so an ownership check can never see the OID of one
+// stash and the message of another.
+func stashTopEntry(ctx context.Context, g *gitx.Runner) (oid, subject string, err error) {
+	out, qerr := g.Query(ctx, "log", "-g", "refs/stash", "-n", "1", "--format=%H%x00%gs")
+	if qerr != nil {
+		return "", "", qerr
+	}
+	oid, subject, ok := strings.Cut(strings.TrimSpace(out), "\x00")
+	if !ok {
+		return "", "", fmt.Errorf("unexpected stash reflog output %q", out)
+	}
+	return oid, subject, nil
 }
 
 // stashTopOID returns the commit OID of the current stash top, or "" when

@@ -15,7 +15,7 @@ import (
 )
 
 // Version is reported by --version.
-var Version = "0.2.0"
+var Version = "0.3.0"
 
 // NewRootCmd builds the full command tree.
 func NewRootCmd() *cobra.Command {
@@ -71,6 +71,7 @@ func NewRootCmd() *cobra.Command {
 		newUndoCmd(runner),
 		newBranchesCmd(runner),
 		newStatusCmd(runner),
+		newDiffCmd(runner),
 		newConfigCmd(runner),
 	)
 	return root
@@ -98,9 +99,11 @@ func withLock(cmd *cobra.Command, g *gitx.Runner, fn func(ctx context.Context, w
 	if err != nil {
 		return err
 	}
-	if branch, berr := r.CurrentBranch(ctx); berr == nil {
-		led.WarnPending(cmd.ErrOrStderr(), branch)
+	branch, berr := r.CurrentBranch(ctx)
+	if berr != nil {
+		branch = "" // detached HEAD: WarnPending warns about every parked stash
 	}
+	led.WarnPending(cmd.ErrOrStderr(), branch)
 
 	w := workflow.New(r, cmd.OutOrStdout())
 	err = fn(ctx, w)
