@@ -1,9 +1,13 @@
 name: Release
 
+# Manual release only
 on:
-  push:
-    tags:
-      - "*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release version tag (e.g. 1.0.0, no 'v' prefix)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -18,7 +22,10 @@ jobs:
       - name: Resolve release version
         id: resolve_version
         run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
+          VERSION="${{ inputs.tag || '' }}"
+          if [ -z "${VERSION}" ]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
 
           if [ -z "${VERSION}" ]; then
             echo "Error: VERSION is empty"
